@@ -1,14 +1,17 @@
 import React from 'react';
-import { Eye, Home, Play, RotateCcw, Volume2, VolumeX } from 'lucide-react';
+import { User } from 'firebase/auth';
+import { Eye, Home, Play, RotateCcw, User as UserIcon, Volume2, VolumeX } from 'lucide-react';
 
 interface PauseModalProps {
   level: number;
   muted: boolean;
   colorblindMode: boolean;
+  user: User | null;
   onResume: () => void;
   onRestart: () => void;
   onToggleMute: () => void;
   onToggleColorblind: () => void;
+  onOpenAccount: () => void;
   onReturnTitle: () => void;
 }
 
@@ -16,10 +19,12 @@ export const PauseModal: React.FC<PauseModalProps> = ({
   level,
   muted,
   colorblindMode,
+  user,
   onResume,
   onRestart,
   onToggleMute,
   onToggleColorblind,
+  onOpenAccount,
   onReturnTitle,
 }) => {
   return (
@@ -52,6 +57,20 @@ export const PauseModal: React.FC<PauseModalProps> = ({
           >
             <RotateCcw className="w-4 h-4" />
             <span>Restart Level</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={onOpenAccount}
+            className="w-full flex items-center justify-between px-4 py-3 rounded-xl bg-white/[0.04] hover:bg-white/[0.08] border border-white/10 text-slate-200 text-sm transition-colors cursor-pointer"
+          >
+            <span className="flex items-center gap-2.5">
+              <UserIcon className="w-4 h-4 text-cyan-300" />
+              <span>Account & Daily Bonus</span>
+            </span>
+            <span className="text-xs text-slate-400 truncate max-w-[100px]">
+              {user ? user.displayName || 'Synced' : 'Guest'}
+            </span>
           </button>
 
           <button

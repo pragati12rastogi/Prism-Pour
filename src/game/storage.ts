@@ -2,13 +2,15 @@ import { SaveData } from './types';
 
 const STORAGE_KEY = 'prism_pour_save_v1';
 
-const DEFAULT_SAVE: SaveData = {
+export const DEFAULT_SAVE: SaveData = {
   unlockedLevel: 1,
   currentLevel: 1,
   coins: 100,
   bestMovesByLevel: {},
   muted: false,
   colorblindMode: false,
+  lastDailyRewardAt: null,
+  dailyRewardCount: 0,
   activeSession: null,
 };
 
@@ -19,13 +21,29 @@ export function loadSaveData(): SaveData {
     if (!raw) return { ...DEFAULT_SAVE };
     const parsed = JSON.parse(raw) as Partial<SaveData>;
     return {
-      unlockedLevel: typeof parsed.unlockedLevel === 'number' && parsed.unlockedLevel >= 1 ? parsed.unlockedLevel : 1,
-      currentLevel: typeof parsed.currentLevel === 'number' && parsed.currentLevel >= 1 ? parsed.currentLevel : 1,
+      unlockedLevel:
+        typeof parsed.unlockedLevel === 'number' && parsed.unlockedLevel >= 1
+          ? parsed.unlockedLevel
+          : 1,
+      currentLevel:
+        typeof parsed.currentLevel === 'number' && parsed.currentLevel >= 1
+          ? parsed.currentLevel
+          : 1,
       coins: typeof parsed.coins === 'number' && parsed.coins >= 0 ? parsed.coins : 100,
       bestMovesByLevel:
-        parsed.bestMovesByLevel && typeof parsed.bestMovesByLevel === 'object' ? parsed.bestMovesByLevel : {},
+        parsed.bestMovesByLevel && typeof parsed.bestMovesByLevel === 'object'
+          ? parsed.bestMovesByLevel
+          : {},
       muted: Boolean(parsed.muted),
       colorblindMode: Boolean(parsed.colorblindMode),
+      lastDailyRewardAt:
+        typeof parsed.lastDailyRewardAt === 'number' && parsed.lastDailyRewardAt > 0
+          ? parsed.lastDailyRewardAt
+          : null,
+      dailyRewardCount:
+        typeof parsed.dailyRewardCount === 'number' && parsed.dailyRewardCount >= 0
+          ? parsed.dailyRewardCount
+          : 0,
       activeSession: parsed.activeSession ?? null,
     };
   } catch {

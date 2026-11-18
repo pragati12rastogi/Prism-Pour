@@ -1,22 +1,36 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { User, onAuthStateChanged, signInWithPopup, signOut } from 'firebase/auth';
 import {
   Coins,
   Eye,
   Grid,
   Lightbulb,
+  LogIn,
   Pause,
   Plus,
   RotateCcw,
   Undo2,
+  UserCheck,
   Volume2,
   VolumeX,
 } from 'lucide-react';
+import { AccountModal } from './components/AccountModal';
 import { Bottle } from './components/Bottle';
+import { DailyRewardModal } from './components/DailyRewardModal';
 import { LevelSelectModal } from './components/LevelSelectModal';
 import { PauseModal } from './components/PauseModal';
 import { PourOverlay } from './components/PourOverlay';
 import { TitleScreen } from './components/TitleScreen';
 import { VictoryModal } from './components/VictoryModal';
+import { auth, googleProvider } from './firebase';
+import {
+  DAILY_REWARD_COINS,
+  claimCloudDailyReward,
+  isDailyRewardEligible,
+  loadOrCreateCloudProfile,
+  saveCloudActiveSession,
+  saveCloudProgress,
+} from './game/cloudSync';
 import {
   BOTTLE_CAPACITY,
   canPour,
@@ -31,6 +45,7 @@ import {
 import { soundEngine } from './game/sound';
 import { loadSaveData, persistSaveData } from './game/storage';
 import {
+  ActiveSession,
   Bottle as BottleType,
   GamePhase,
   HintSuggestion,
@@ -49,6 +64,15 @@ export default function App() {
     soundEngine.setMuted(loaded.muted);
     return loaded;
   });
+
+  // Firebase Auth & Sync state
+  const [user, setUser] = useState<User | null>(null);
+  const [authReady, setAuthReady] = useState(false);
+  const [authBusy, setAuthBusy] = useState(false);
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [accountOpen, setAccountOpen] = useState(false);
+  const [dailyRewardOpen, setDailyRewardOpen] = useState(false);
+  const [asyncError, setAsyncError] = useState<Error | null>(null);
 
   const [phase, setPhase] = useState<GamePhase>('TITLE_MENU');
   const [levelSelectOpen, setLevelSelectOpen] = useState(false);
@@ -74,6 +98,24 @@ export default function App() {
   const feedbackTimerRef = useRef<number | null>(null);
   const pourTimerRef = useRef<number | null>(null);
   const victoryTimerRef = useRef<number | null>(null);
+  const sessionSyncTimerRef = useRef<number | null>(null);
+  const cloudReadyRef = useRef<boolean>(false);
+  const claimingDailyRef = useRef<boolean>(false);
+  const saveRef = useRef<SaveData>(save);
+  const userRef = useRef<User | null>(user);
+
+  // Surface async Firestore errors to React ErrorBoundary
+  if (asyncError) {
+    throw asyncError;
+  }
+
+  useEffect(() => {
+    saveRef.current = save;
+  }, [save]);
+
+  useEffect(() => {
+    userRef.current = user;
+  }, [user]);
 
   const showFeedback = useCallback((msg: string) => {
     setFeedbackMsg(msg);
@@ -91,6 +133,168 @@ export default function App() {
     }
   }, []);
 
+  // Grant 24-hour daily reward (cloud if signed in, local if guest)
+  const triggerDailyRewardIfEligible = useCallback(
+    async (activeUser: User | null, currentSave: SaveData) => {
+      if (claimingDailyRef.current) return;
+      if (!isDailyRewardEligible(currentSave.lastDailyRewardAt)) return;
+
+      claimingDailyRef.current = true;
+      try {
+        if (activeUser && cloudReadyRef.current) {
+          const updated = await claimCloudDailyReward(activeUser, currentSave);
+          setSave(updated);
+          persistSaveData(updated);
+        } else {
+          const updated: SaveData = {
+            ...currentSave,
+            coins: currentSave.coins + DAILY_REWARD_COINS,
+            dailyRewardCount: currentSave.dailyRewardCount + 1,
+            lastDailyRewardAt: Date.now(),
+          };
+          setSave(updated);
+          persistSaveData(updated);
+        }
+        soundEngine.playCoinReward();
+        setDailyRewardOpen(true);
+      } catch (err) {
+        if (err instanceof Error) setAsyncError(err);
+      } finally {
+        claimingDailyRef.current = false;
+      }
+    },
+    []
+  );
+
+  // Listen for Firebase Auth state changes
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, async (nextUser) => {
+      setUser(nextUser);
+      userRef.current = nextUser;
+
+      if (nextUser) {
+        cloudReadyRef.current = false;
+        try {
+          const localSnapshot = loadSaveData();
+          const { save: syncedSave, dailyRewardClaimedNow } = await loadOrCreateCloudProfile(
+            nextUser,
+            localSnapshot
+          );
+          cloudReadyRef.current = true;
+          soundEngine.setMuted(syncedSave.muted);
+          setSave(syncedSave);
+          persistSaveData(syncedSave);
+          setLevelNum(syncedSave.currentLevel);
+
+          if (dailyRewardClaimedNow) {
+            soundEngine.playCoinReward();
+            setDailyRewardOpen(true);
+          }
+        } catch (err) {
+          if (err instanceof Error) setAsyncError(err);
+        } finally {
+          setAuthReady(true);
+        }
+      } else {
+        cloudReadyRef.current = false;
+        setAuthReady(true);
+        const currentLocal = loadSaveData();
+        if (isDailyRewardEligible(currentLocal.lastDailyRewardAt)) {
+          void triggerDailyRewardIfEligible(null, currentLocal);
+        }
+      }
+    });
+
+    return () => unsubscribe();
+  }, [triggerDailyRewardIfEligible]);
+
+  // Re-check 24-hour daily reward eligibility on window focus or every 60s
+  useEffect(() => {
+    if (!authReady) return;
+
+    const checkEligibility = () => {
+      if (isDailyRewardEligible(saveRef.current.lastDailyRewardAt)) {
+        void triggerDailyRewardIfEligible(userRef.current, saveRef.current);
+      }
+    };
+
+    const onFocus = () => checkEligibility();
+    window.addEventListener('focus', onFocus);
+    const interval = window.setInterval(checkEligibility, 60000);
+
+    return () => {
+      window.removeEventListener('focus', onFocus);
+      window.clearInterval(interval);
+    };
+  }, [authReady, triggerDailyRewardIfEligible]);
+
+  // Sync top-level progress changes to Firestore
+  const syncProgressToCloud = useCallback((nextSave: SaveData) => {
+    const activeUser = userRef.current;
+    if (!activeUser || !cloudReadyRef.current) return;
+    void saveCloudProgress(activeUser, nextSave).catch((err) => {
+      if (err instanceof Error) setAsyncError(err);
+    });
+  }, []);
+
+  // Debounced sync for active mid-level board session
+  const syncSessionToCloud = useCallback((session: ActiveSession | null, immediate = false) => {
+    const activeUser = userRef.current;
+    if (!activeUser || !cloudReadyRef.current) return;
+
+    if (sessionSyncTimerRef.current) {
+      window.clearTimeout(sessionSyncTimerRef.current);
+      sessionSyncTimerRef.current = null;
+    }
+
+    if (immediate) {
+      void saveCloudActiveSession(activeUser, session).catch((err) => {
+        if (err instanceof Error) setAsyncError(err);
+      });
+      return;
+    }
+
+    sessionSyncTimerRef.current = window.setTimeout(() => {
+      void saveCloudActiveSession(activeUser, session).catch((err) => {
+        if (err instanceof Error) setAsyncError(err);
+      });
+    }, 650);
+  }, []);
+
+  const handleSignInGoogle = useCallback(async () => {
+    setAuthError(null);
+    setAuthBusy(true);
+    try {
+      await signInWithPopup(auth, googleProvider);
+      setAccountOpen(false);
+      soundEngine.playSelect();
+    } catch (err: unknown) {
+      const code = (err as { code?: string })?.code;
+      if (code === 'auth/popup-closed-by-user' || code === 'auth/cancelled-popup-request') {
+        setAuthError(null);
+      } else {
+        setAuthError(err instanceof Error ? err.message : 'Google Sign-In failed.');
+      }
+    } finally {
+      setAuthBusy(false);
+    }
+  }, []);
+
+  const handleSignOut = useCallback(async () => {
+    setAuthError(null);
+    setAuthBusy(true);
+    try {
+      cloudReadyRef.current = false;
+      await signOut(auth);
+      setAccountOpen(false);
+      soundEngine.playDeselect();
+    } catch (err) {
+      setAuthError(err instanceof Error ? err.message : 'Sign-out failed.');
+    } finally {
+      setAuthBusy(false);
+    }
+  }, []);
+
   // Load or initialize a level
   const loadLevel = useCallback(
     (targetLevel: number, resumeSession = false) => {
@@ -103,14 +307,16 @@ export default function App() {
       setActiveHint(null);
       setFeedbackMsg(null);
 
+      const currentSave = saveRef.current;
+
       if (
         resumeSession &&
-        save.activeSession &&
-        save.activeSession.level === targetLevel &&
-        save.activeSession.bottles.length > 0 &&
-        !isGameWon(save.activeSession.bottles)
+        currentSave.activeSession &&
+        currentSave.activeSession.level === targetLevel &&
+        currentSave.activeSession.bottles.length > 0 &&
+        !isGameWon(currentSave.activeSession.bottles)
       ) {
-        const s = save.activeSession;
+        const s = currentSave.activeSession;
         setLevelNum(s.level);
         setBottles(cloneBottles(s.bottles));
         setInitialBottles(cloneBottles(s.initialBottles));
@@ -128,48 +334,59 @@ export default function App() {
       setExtraBottlesAdded(0);
       setParMoves(generated.parMoves);
 
+      const newSession: ActiveSession = {
+        level: generated.level,
+        bottles: cloneBottles(generated.bottles),
+        initialBottles: cloneBottles(generated.bottles),
+        history: [],
+        extraBottlesAdded: 0,
+        parMoves: generated.parMoves,
+      };
+
       setSave((prev) => {
         const next: SaveData = {
           ...prev,
           currentLevel: targetLevel,
-          activeSession: {
-            level: generated.level,
-            bottles: cloneBottles(generated.bottles),
-            initialBottles: cloneBottles(generated.bottles),
-            history: [],
-            extraBottlesAdded: 0,
-            parMoves: generated.parMoves,
-          },
+          activeSession: newSession,
         };
         persistSaveData(next);
+        syncProgressToCloud(next);
+        syncSessionToCloud(newSession, true);
         return next;
       });
     },
-    [save.activeSession]
+    [syncProgressToCloud, syncSessionToCloud]
   );
 
   // Persist mid-level session whenever bottles/history change during PLAYING
   useEffect(() => {
     if (phase !== 'PLAYING' || bottles.length === 0) return;
+    const won = isGameWon(bottles);
+    const nextSession: ActiveSession | null = won
+      ? null
+      : {
+          level: levelNum,
+          bottles: cloneBottles(bottles),
+          initialBottles: cloneBottles(initialBottles),
+          history: [...history],
+          extraBottlesAdded,
+          parMoves,
+        };
+
     setSave((prev) => {
       const next: SaveData = {
         ...prev,
         currentLevel: levelNum,
-        activeSession: isGameWon(bottles)
-          ? null
-          : {
-              level: levelNum,
-              bottles: cloneBottles(bottles),
-              initialBottles: cloneBottles(initialBottles),
-              history: [...history],
-              extraBottlesAdded,
-              parMoves,
-            },
+        activeSession: nextSession,
       };
       persistSaveData(next);
       return next;
     });
-  }, [bottles, history, extraBottlesAdded, levelNum, initialBottles, parMoves, phase]);
+
+    if (!won) {
+      syncSessionToCloud(nextSession, false);
+    }
+  }, [bottles, history, extraBottlesAdded, levelNum, initialBottles, parMoves, phase, syncSessionToCloud]);
 
   // Cleanup timers on unmount
   useEffect(() => {
@@ -177,6 +394,7 @@ export default function App() {
       if (feedbackTimerRef.current) window.clearTimeout(feedbackTimerRef.current);
       if (pourTimerRef.current) window.clearTimeout(pourTimerRef.current);
       if (victoryTimerRef.current) window.clearTimeout(victoryTimerRef.current);
+      if (sessionSyncTimerRef.current) window.clearTimeout(sessionSyncTimerRef.current);
     };
   }, []);
 
@@ -202,17 +420,19 @@ export default function App() {
       soundEngine.setMuted(muted);
       const next = { ...prev, muted };
       persistSaveData(next);
+      syncProgressToCloud(next);
       return next;
     });
-  }, []);
+  }, [syncProgressToCloud]);
 
   const handleToggleColorblind = useCallback(() => {
     setSave((prev) => {
       const next = { ...prev, colorblindMode: !prev.colorblindMode };
       persistSaveData(next);
+      syncProgressToCloud(next);
       return next;
     });
-  }, []);
+  }, [syncProgressToCloud]);
 
   const handleRestart = useCallback(() => {
     if (pourAnim) return;
@@ -265,6 +485,7 @@ export default function App() {
       setSave((prev) => {
         const next = { ...prev, coins: Math.max(0, prev.coins - costToDeduct) };
         persistSaveData(next);
+        syncProgressToCloud(next);
         return next;
       });
     }
@@ -272,7 +493,7 @@ export default function App() {
     setSelectedIdx(null);
     setActiveHint(suggestion);
     soundEngine.playSelect();
-  }, [activeHint, bottles, phase, pourAnim, save.coins, showFeedback]);
+  }, [activeHint, bottles, phase, pourAnim, save.coins, showFeedback, syncProgressToCloud]);
 
   const handleAddBottle = useCallback(() => {
     if (pourAnim || phase !== 'PLAYING') return;
@@ -294,6 +515,7 @@ export default function App() {
       setSave((prev) => {
         const next = { ...prev, coins: Math.max(0, prev.coins - cost) };
         persistSaveData(next);
+        syncProgressToCloud(next);
         return next;
       });
     }
@@ -304,7 +526,7 @@ export default function App() {
     setSelectedIdx(null);
     soundEngine.playSelect();
     showFeedback(cost === 0 ? 'Added free emergency bottle!' : 'Extra empty bottle added.');
-  }, [extraBottlesAdded, phase, pourAnim, save.coins, showFeedback]);
+  }, [extraBottlesAdded, phase, pourAnim, save.coins, showFeedback, syncProgressToCloud]);
 
   const handleSelectBottle = useCallback(
     (idx: number) => {
@@ -313,7 +535,6 @@ export default function App() {
       const clicked = bottles[idx];
       if (!clicked) return;
 
-      // Case 1: Nothing selected yet
       if (selectedIdx === null) {
         if (clicked.length === 0) {
           setShakingIdx(idx);
@@ -333,14 +554,12 @@ export default function App() {
         return;
       }
 
-      // Case 2: Clicking the already selected bottle deselects it
       if (selectedIdx === idx) {
         setSelectedIdx(null);
         soundEngine.playDeselect();
         return;
       }
 
-      // Case 3: Attempting to pour from selectedIdx -> idx
       if (!canPour(bottles, selectedIdx, idx)) {
         setShakingIdx(idx);
         window.setTimeout(() => setShakingIdx(null), 340);
@@ -390,7 +609,6 @@ export default function App() {
         setPourAnim(null);
       }, 340);
 
-      // Check victory
       if (isGameWon(result.nextBottles)) {
         const isFirstCompletion = !save.bestMovesByLevel[levelNum];
         const efficiencyBonus = nextMovesCount <= parMoves ? 10 : 5;
@@ -412,6 +630,8 @@ export default function App() {
             activeSession: null,
           };
           persistSaveData(nextSave);
+          syncProgressToCloud(nextSave);
+          syncSessionToCloud(null, true);
           return nextSave;
         });
 
@@ -421,7 +641,19 @@ export default function App() {
         }, 440);
       }
     },
-    [bottles, history.length, levelNum, parMoves, phase, pourAnim, save.bestMovesByLevel, selectedIdx, showFeedback]
+    [
+      bottles,
+      history.length,
+      levelNum,
+      parMoves,
+      phase,
+      pourAnim,
+      save.bestMovesByLevel,
+      selectedIdx,
+      showFeedback,
+      syncProgressToCloud,
+      syncSessionToCloud,
+    ]
   );
 
   const handleNextLevel = useCallback(() => {
@@ -434,6 +666,14 @@ export default function App() {
   // Keyboard shortcuts during PLAYING / PAUSED
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
+      if (accountOpen) {
+        if (e.key === 'Escape') setAccountOpen(false);
+        return;
+      }
+      if (dailyRewardOpen) {
+        if (e.key === 'Escape' || e.key === 'Enter') setDailyRewardOpen(false);
+        return;
+      }
       if (levelSelectOpen) {
         if (e.key === 'Escape') setLevelSelectOpen(false);
         return;
@@ -460,9 +700,16 @@ export default function App() {
 
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [handleHint, handleRestart, handleUndo, levelSelectOpen, phase]);
+  }, [
+    accountOpen,
+    dailyRewardOpen,
+    handleHint,
+    handleRestart,
+    handleUndo,
+    levelSelectOpen,
+    phase,
+  ]);
 
-  // Compute balanced rows for clean centered layout
   const bottleRows = useMemo(() => {
     if (bottles.length <= 5) {
       return [bottles.map((b, i) => ({ bottle: b, index: i }))];
@@ -475,12 +722,19 @@ export default function App() {
 
   const solvedCount = useMemo(() => bottles.filter((b) => isBottleSolved(b)).length, [bottles]);
   const totalColors = useMemo(
-    () => Math.max(1, bottles.filter((b) => b.length > 0).length > 0 ? Math.round(bottles.reduce((s, b) => s + b.length, 0) / 4) : 1),
+    () =>
+      Math.max(
+        1,
+        bottles.filter((b) => b.length > 0).length > 0
+          ? Math.round(bottles.reduce((s, b) => s + b.length, 0) / 4)
+          : 1
+      ),
     [bottles]
   );
 
   const playfieldRect = playfieldRef.current ? playfieldRef.current.getBoundingClientRect() : null;
   const compactMode = bottles.length >= 11;
+  const anyModalOpen = levelSelectOpen || accountOpen || dailyRewardOpen;
 
   return (
     <div className="min-h-screen w-full bg-[#08101c] text-slate-100 flex flex-col relative overflow-hidden">
@@ -500,16 +754,20 @@ export default function App() {
           unlockedLevel={save.unlockedLevel}
           coins={save.coins}
           muted={save.muted}
+          user={user}
+          lastDailyRewardAt={save.lastDailyRewardAt}
+          modalOpen={anyModalOpen}
           onStartGame={handleStartFromTitle}
           onOpenLevelSelect={() => setLevelSelectOpen(true)}
+          onOpenAccount={() => setAccountOpen(true)}
           onToggleMute={handleToggleMute}
         />
       ) : (
         <div className="relative z-10 flex-1 flex flex-col min-h-screen">
           {/* Top Navigation HUD */}
-          <header className="w-full max-w-5xl mx-auto px-4 sm:px-8 pt-4 pb-2 flex items-center justify-between gap-4">
+          <header className="w-full max-w-5xl mx-auto px-4 sm:px-8 pt-4 pb-2 flex items-center justify-between gap-3">
             {/* Left: Pause & Level Selector */}
-            <div className="flex items-center gap-2.5">
+            <div className="flex items-center gap-2">
               <button
                 type="button"
                 onClick={() => setPhase('PAUSED')}
@@ -536,17 +794,14 @@ export default function App() {
 
             {/* Center: Moves & Level Progress */}
             <div className="flex flex-col items-center">
-              <div className="flex items-center gap-4 text-sm">
-                <div className="flex items-baseline gap-1.5">
-                  <span className="text-xs text-slate-400">Moves</span>
-                  <span className="font-mono-tabular text-lg font-bold text-white">
-                    {history.length}
-                  </span>
-                </div>
+              <div className="flex items-baseline gap-1.5">
+                <span className="text-xs text-slate-400">Moves</span>
+                <span className="font-mono-tabular text-lg font-bold text-white">
+                  {history.length}
+                </span>
               </div>
-              {/* Subtle linear level progress bar */}
               <div
-                className="w-24 sm:w-32 h-1 rounded-full bg-white/10 overflow-hidden mt-1"
+                className="w-20 sm:w-32 h-1 rounded-full bg-white/10 overflow-hidden mt-1"
                 aria-label={`Progress: ${solvedCount} of ${totalColors} bottles sorted`}
               >
                 <div
@@ -556,22 +811,44 @@ export default function App() {
               </div>
             </div>
 
-            {/* Right: Coins & Accessibility / Audio Controls */}
+            {/* Right: Coins (opens Daily Bonus), Account Sign-In, Accessibility & Audio */}
             <div className="flex items-center gap-2">
-              <div
-                className="h-11 px-3 rounded-xl bg-white/[0.05] border border-white/10 flex items-center gap-2 text-amber-300 font-mono-tabular text-sm font-bold"
-                aria-label={`${save.coins} coins`}
+              <button
+                type="button"
+                onClick={() => setAccountOpen(true)}
+                className="h-11 px-3 rounded-xl bg-white/[0.05] hover:bg-white/[0.12] border border-white/10 flex items-center gap-2 text-amber-300 font-mono-tabular text-sm font-bold transition-colors cursor-pointer whitespace-nowrap"
+                aria-label={`${save.coins} coins — view daily reward`}
               >
                 <Coins className="w-4 h-4 shrink-0" />
                 <span>{save.coins}</span>
-              </div>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setAccountOpen(true)}
+                aria-label={user ? 'Account settings' : 'Sign in to save progress'}
+                className="w-11 h-11 rounded-xl bg-white/[0.06] hover:bg-white/[0.12] border border-white/10 flex items-center justify-center text-slate-200 transition-colors cursor-pointer shrink-0 overflow-hidden"
+              >
+                {user?.photoURL ? (
+                  <img
+                    src={user.photoURL}
+                    alt={user.displayName || 'Player'}
+                    referrerPolicy="no-referrer"
+                    className="w-7 h-7 rounded-full object-cover"
+                  />
+                ) : user ? (
+                  <UserCheck className="w-4 h-4 text-emerald-400" />
+                ) : (
+                  <LogIn className="w-4 h-4 text-cyan-300" />
+                )}
+              </button>
 
               <button
                 type="button"
                 onClick={handleToggleColorblind}
                 aria-label={save.colorblindMode ? 'Hide color symbols' : 'Show color symbols'}
                 title="Toggle colorblind symbols"
-                className={`hidden sm:flex w-11 h-11 rounded-xl border items-center justify-center transition-colors cursor-pointer shrink-0 ${
+                className={`hidden md:flex w-11 h-11 rounded-xl border items-center justify-center transition-colors cursor-pointer shrink-0 ${
                   save.colorblindMode
                     ? 'bg-cyan-400/20 border-cyan-400/50 text-cyan-200'
                     : 'bg-white/[0.06] hover:bg-white/[0.12] border-white/10 text-slate-300'
@@ -596,10 +873,8 @@ export default function App() {
             ref={playfieldRef}
             className="relative flex-1 flex flex-col items-center justify-center px-3 sm:px-6 py-4 sm:py-6"
           >
-            {/* Dynamic Pouring Stream Overlay */}
             <PourOverlay pourAnim={pourAnim} containerRect={playfieldRect} />
 
-            {/* Ephemeral non-intrusive rule feedback */}
             <div className="h-7 mb-2 flex items-center justify-center pointer-events-none">
               {feedbackMsg && (
                 <p className="text-xs sm:text-sm font-medium text-cyan-200 bg-slate-900/80 border border-white/10 px-3.5 py-1 rounded-lg shadow-lg">
@@ -608,7 +883,6 @@ export default function App() {
               )}
             </div>
 
-            {/* Bottle Rows */}
             <div className="w-full max-w-5xl flex flex-col items-center justify-center gap-10 sm:gap-12">
               {bottleRows.map((row, rowIdx) => (
                 <div
@@ -703,7 +977,12 @@ export default function App() {
               >
                 <Plus className="w-4 h-4 sm:w-5 sm:h-5 text-cyan-300" />
                 <span className="text-[11px] sm:text-xs font-medium whitespace-nowrap">
-                  +Bottle {extraBottlesAdded >= MAX_EXTRA_BOTTLES ? '(Max)' : save.coins >= EXTRA_BOTTLE_COST ? `· ${EXTRA_BOTTLE_COST}` : '· Free'}
+                  +Bottle{' '}
+                  {extraBottlesAdded >= MAX_EXTRA_BOTTLES
+                    ? '(Max)'
+                    : save.coins >= EXTRA_BOTTLE_COST
+                    ? `· ${EXTRA_BOTTLE_COST}`
+                    : '· Free'}
                 </span>
               </button>
             </div>
@@ -721,15 +1000,48 @@ export default function App() {
         onClose={() => setLevelSelectOpen(false)}
       />
 
+      <AccountModal
+        isOpen={accountOpen}
+        user={user}
+        authBusy={authBusy}
+        authError={authError}
+        coins={save.coins}
+        unlockedLevel={save.unlockedLevel}
+        dailyRewardCount={save.dailyRewardCount}
+        lastDailyRewardAt={save.lastDailyRewardAt}
+        onSignInGoogle={handleSignInGoogle}
+        onSignOut={handleSignOut}
+        onClaimDailyReward={() => {
+          setAccountOpen(false);
+          void triggerDailyRewardIfEligible(user, save);
+        }}
+        onClose={() => setAccountOpen(false)}
+      />
+
+      <DailyRewardModal
+        isOpen={dailyRewardOpen}
+        dailyRewardCount={save.dailyRewardCount}
+        lastDailyRewardAt={save.lastDailyRewardAt}
+        totalCoins={save.coins}
+        isSignedIn={Boolean(user)}
+        onClose={() => setDailyRewardOpen(false)}
+        onOpenAccount={() => setAccountOpen(true)}
+      />
+
       {phase === 'PAUSED' && (
         <PauseModal
           level={levelNum}
           muted={save.muted}
           colorblindMode={save.colorblindMode}
+          user={user}
           onResume={() => setPhase('PLAYING')}
           onRestart={handleRestart}
           onToggleMute={handleToggleMute}
           onToggleColorblind={handleToggleColorblind}
+          onOpenAccount={() => {
+            setPhase('PLAYING');
+            setAccountOpen(true);
+          }}
           onReturnTitle={() => setPhase('TITLE_MENU')}
         />
       )}

@@ -63,5 +63,7 @@ export interface SaveData {
   bestMovesByLevel: Record<number, number>;
   muted: boolean;
   colorblindMode: boolean;
+  lastDailyRewardAt: number | null;
+  dailyRewardCount: number;
   activeSession?: ActiveSession | null;
 }

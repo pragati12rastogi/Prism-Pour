@@ -2,5 +2,7 @@
   "name": "Prism Pour",
   "description": "An interactive liquid-sorting puzzle game with realistic glass bottles, smooth pouring physics, solvable level progression, and intelligent hints.",
   "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
 }

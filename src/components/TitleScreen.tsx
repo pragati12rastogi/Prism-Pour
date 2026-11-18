@@ -1,13 +1,19 @@
 import React, { useEffect } from 'react';
-import { Grid, Play, Volume2, VolumeX } from 'lucide-react';
+import { User } from 'firebase/auth';
+import { Gift, Grid, LogIn, Play, UserCheck, Volume2, VolumeX } from 'lucide-react';
+import { isDailyRewardEligible } from '../game/cloudSync';
 
 interface TitleScreenProps {
   currentLevel: number;
   unlockedLevel: number;
   coins: number;
   muted: boolean;
+  user: User | null;
+  lastDailyRewardAt: number | null;
+  modalOpen: boolean;
   onStartGame: () => void;
   onOpenLevelSelect: () => void;
+  onOpenAccount: () => void;
   onToggleMute: () => void;
 }
 
@@ -16,11 +22,16 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
   unlockedLevel,
   coins,
   muted,
+  user,
+  lastDailyRewardAt,
+  modalOpen,
   onStartGame,
   onOpenLevelSelect,
+  onOpenAccount,
   onToggleMute,
 }) => {
   useEffect(() => {
+    if (modalOpen) return;
     const handleKey = (e: KeyboardEvent) => {
       if (e.key === 'Enter' || e.key === ' ') {
         e.preventDefault();
@@ -29,7 +40,9 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
     };
     window.addEventListener('keydown', handleKey);
     return () => window.removeEventListener('keydown', handleKey);
-  }, [onStartGame]);
+  }, [modalOpen, onStartGame]);
+
+  const dailyReady = isDailyRewardEligible(lastDailyRewardAt);
 
   return (
     <div className="relative min-h-screen w-full overflow-hidden flex flex-col justify-between bg-[#08101c]">
@@ -48,8 +61,8 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
         <div className="absolute inset-0 bg-gradient-to-t from-[#060d18] via-transparent to-[#060d18]/60" />
       </div>
 
-      {/* Top minimal audio control */}
-      <div className="relative z-10 flex items-center justify-between px-6 sm:px-10 pt-6">
+      {/* Top minimal status & account controls */}
+      <div className="relative z-10 flex flex-wrap items-center justify-between gap-4 px-6 sm:px-10 pt-6">
         <div className="flex items-center gap-3 text-sm text-slate-300 font-mono-tabular">
           <span>Level {currentLevel}</span>
           <span aria-hidden="true" className="text-slate-600">·</span>
@@ -58,14 +71,57 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
           <span className="text-amber-300">{coins} Coins</span>
         </div>
 
-        <button
-          type="button"
-          onClick={onToggleMute}
-          aria-label={muted ? 'Unmute audio' : 'Mute audio'}
-          className="w-11 h-11 rounded-xl bg-white/[0.06] hover:bg-white/[0.12] border border-white/10 flex items-center justify-center text-slate-200 transition-colors cursor-pointer"
-        >
-          {muted ? <VolumeX className="w-5 h-5" /> : <Volume2 className="w-5 h-5" />}
-        </button>
+        <div className="flex items-center gap-2.5">
+          <button
+            type="button"
+            onClick={onOpenAccount}
+            className="h-11 px-3.5 rounded-xl bg-white/[0.06] hover:bg-white/[0.12] border border-white/10 flex items-center gap-2 text-sm text-slate-100 transition-colors cursor-pointer whitespace-nowrap"
+          >
+            {user ? (
+              <>
+                {user.photoURL ? (
+                  <img
+                    src={user.photoURL}
+                    alt={user.displayName || 'Player'}
+                    referrerPolicy="no-referrer"
+                    className="w-6 h-6 rounded-full object-cover"
+                  />
+                ) : (
+                  <UserCheck className="w-4 h-4 text-emerald-400" />
+                )}
+                <span className="max-w-[120px] truncate">{user.displayName || 'Account'}</span>
+              </>
+            ) : (
+              <>
+                <LogIn className="w-4 h-4 text-cyan-300" />
+                <span>Sign In</span>
+              </>
+            )}
+          </button>
+
+          <button
+            type="button"
+            onClick={onOpenAccount}
+            aria-label="Daily Reward Status"
+            className={`h-11 px-3.5 rounded-xl border flex items-center gap-2 text-sm transition-colors cursor-pointer whitespace-nowrap ${
+              dailyReady
+                ? 'bg-amber-400/20 hover:bg-amber-400/30 border-amber-400/45 text-amber-200'
+                : 'bg-white/[0.06] hover:bg-white/[0.12] border-white/10 text-slate-200'
+            }`}
+          >
+            <Gift className="w-4 h-4 text-amber-300" />
+            <span className="hidden sm:inline">{dailyReady ? 'Daily +50' : 'Daily Bonus'}</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={onToggleMute}
+            aria-label={muted ? 'Unmute audio' : 'Mute audio'}
+            className="w-11 h-11 rounded-xl bg-white/[0.06] hover:bg-white/[0.12] border border-white/10 flex items-center justify-center text-slate-200 transition-colors cursor-pointer shrink-0"
+          >
+            {muted ? <VolumeX className="w-5 h-5" /> : <Volume2 className="w-5 h-5" />}
+          </button>
+        </div>
       </div>
 
       {/* Main Hero Lockup over calm negative space */}
@@ -112,13 +168,15 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
             </div>
           </div>
 
-          {/* Crisp 3-line rules overview */}
+          {/* Crisp rules overview */}
           <div className="space-y-2.5 text-sm sm:text-base text-slate-300 border-t border-white/10 pt-5 max-w-md">
             <p className="leading-relaxed">
               Sort mixed liquids so every glass bottle holds 4 matching units of a single color.
             </p>
             <p className="text-slate-400 text-sm">
-              Pour only into empty bottles or onto matching top colors with open space.
+              {user
+                ? `Signed in as ${user.displayName || user.email} · Cloud progress sync enabled.`
+                : 'Sign in with Google to save progress across devices and collect +50 daily coins.'}
             </p>
           </div>
 

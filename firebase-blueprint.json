@@ -1,0 +1,148 @@
+{
+  "entities": {
+    "UserProgress": {
+      "title": "UserProgress",
+      "description": "Stores a player's Prism Pour progression, coin balance, settings, and 24-hour daily reward claim timestamp.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Firebase Auth UID of the player."
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80,
+          "description": "Player display name."
+        },
+        "unlockedLevel": {
+          "type": "integer",
+          "description": "Highest unlocked puzzle level (1-10000)."
+        },
+        "currentLevel": {
+          "type": "integer",
+          "description": "Currently selected or active puzzle level (1-10000)."
+        },
+        "coins": {
+          "type": "integer",
+          "description": "Player coin balance."
+        },
+        "dailyRewardCount": {
+          "type": "integer",
+          "description": "Total number of 24-hour daily rewards claimed."
+        },
+        "lastDailyRewardAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of the last daily coin reward claim, or null before first claim."
+        },
+        "muted": {
+          "type": "boolean",
+          "description": "Whether Web Audio sound effects are muted."
+        },
+        "colorblindMode": {
+          "type": "boolean",
+          "description": "Whether geometric colorblind symbols are rendered on liquid layers."
+        },
+        "bestMovesByLevel": {
+          "type": "object",
+          "description": "Map from string level number to lowest recorded moves."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when profile was created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of the latest profile update."
+        }
+      },
+      "required": [
+        "uid",
+        "displayName",
+        "unlockedLevel",
+        "currentLevel",
+        "coins",
+        "dailyRewardCount",
+        "lastDailyRewardAt",
+        "muted",
+        "colorblindMode",
+        "bestMovesByLevel",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "ActiveGameSession": {
+      "title": "ActiveGameSession",
+      "description": "Stores an in-progress puzzle board state so players can resume mid-level across devices.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Firebase Auth UID of the player."
+        },
+        "level": {
+          "type": "integer",
+          "description": "Level number for this active session."
+        },
+        "parMoves": {
+          "type": "integer",
+          "description": "Solver par target moves for the level."
+        },
+        "extraBottlesAdded": {
+          "type": "integer",
+          "description": "Number of extra bottles added in this level (0-2)."
+        },
+        "bottles": {
+          "type": "array",
+          "description": "Current bottle stack state encoded as array of { layers: ColorId[] } objects."
+        },
+        "initialBottles": {
+          "type": "array",
+          "description": "Starting bottle stack state for level restart."
+        },
+        "history": {
+          "type": "array",
+          "description": "Ordered move history for undo support."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when session state was saved."
+        }
+      },
+      "required": [
+        "uid",
+        "level",
+        "parMoves",
+        "extraBottlesAdded",
+        "bottles",
+        "initialBottles",
+        "history",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": {
+        "$ref": "#/entities/UserProgress"
+      },
+      "description": "Per-user game progress, coin wallet, preferences, and 24-hour daily reward state."
+    },
+    "/users/{userId}/sessions/{sessionId}": {
+      "schema": {
+        "$ref": "#/entities/ActiveGameSession"
+      },
+      "description": "Active mid-level puzzle board session for cross-device resume."
+    }
+  }
+}
